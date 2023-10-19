@@ -148,6 +148,7 @@ public class TransactionService {
 		final Optional<RequisicaoTransacaoDTO> requisicaoTransacaoDTO = find(uuid);
 		if(requisicaoTransacaoDTO.isPresent()){
 			LOG.info("DELETANDO recurso " + uuid);
+			redisClient.del(List.of(uuid));
 			return true;
 		}
 		return false;
