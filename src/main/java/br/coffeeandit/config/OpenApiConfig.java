@@ -18,9 +18,10 @@ import javax.ws.rs.core.Application;
                 version = "1.0.0",
                 contact = @Contact(
                         name = "Fale com a Coffeeandit",
+                        email = "coffeeandit@coffeeandit.com.br",
                         url = "https:www.coffeeandit.com.br/")),
         servers = {
-                @Server(url = "http:localhost:8080")
+                @Server(url = "http://localhost:8080")
         })
 public class OpenApiConfig extends Application {
 }
