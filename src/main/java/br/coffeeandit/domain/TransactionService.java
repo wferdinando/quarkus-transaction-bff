@@ -1,6 +1,6 @@
 package br.coffeeandit.domain;
 
-
+import br.coffeeandit.api.dto.CpfDto;
 import br.coffeeandit.api.dto.RequisicaoTransacaoDTO;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -16,11 +16,13 @@ import org.eclipse.microprofile.jwt.JsonWebToken;
 import org.eclipse.microprofile.reactive.messaging.Channel;
 import org.eclipse.microprofile.reactive.messaging.Emitter;
 import org.eclipse.microprofile.reactive.messaging.Message;
+import org.eclipse.microprofile.rest.client.inject.RestClient;
 import org.jboss.logging.Logger;
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import javax.transaction.Transactional;
+import javax.ws.rs.BadRequestException;
 import javax.ws.rs.NotAuthorizedException;
 import javax.ws.rs.core.Response;
 import java.io.BufferedReader;
@@ -45,6 +47,10 @@ import java.util.stream.Collectors;
 @Singleton
 public class TransactionService {
 
+	@Inject
+	@RestClient
+	CPFService cpfService;
+
 	public static final int MINUTES = 15;
 	@Inject
 	RedisClient redisClient;
@@ -59,7 +65,6 @@ public class TransactionService {
 	@Inject
 	JsonWebToken accessToken;
 
-
 	@ConfigProperty(name = "app.encrypt")
 	private boolean isEncrypt;
 
@@ -70,6 +75,9 @@ public class TransactionService {
 	@NonBlocking
 	public Optional<RequisicaoTransacaoDTO> save(final RequisicaoTransacaoDTO requisicaoTransacaoDTO) {
 		try {
+
+			validarCPF(requisicaoTransacaoDTO);
+
 			requisicaoTransacaoDTO.setUuid(UUID.randomUUID());
 			requisicaoTransacaoDTO.setData(LocalDateTime.now());
 			requisicaoTransacaoDTO.aceitaProcessamento();
@@ -94,11 +102,20 @@ public class TransactionService {
 		return Optional.empty();
 	}
 
+	private void validarCPF(final RequisicaoTransacaoDTO requisicaoTransacaoDTO) {
+		final CpfDto cpfDto = cpfService.validarCpf(requisicaoTransacaoDTO.getBeneficiario().getCPF().toString());
+		if (!cpfDto.isValid()) {
+			throw new BadRequestException("CPF Inválido");
+		}
+	}
+
 	@Transactional
 	@NonBlocking
-	public Optional<RequisicaoTransacaoDTO> aprovarTransacao(final RequisicaoTransacaoDTO requisicaoTransacaoDTO, final String signature) {
+	public Optional<RequisicaoTransacaoDTO> aprovarTransacao(final RequisicaoTransacaoDTO requisicaoTransacaoDTO,
+			final String signature) {
 		if (requisicaoTransacaoDTO.getSignature().equals(signature)) {
-			if (validateSignature(requisicaoTransacaoDTO, signature)) return update(requisicaoTransacaoDTO);
+			if (validateSignature(requisicaoTransacaoDTO, signature))
+				return update(requisicaoTransacaoDTO);
 		}
 		throw new NotAuthorizedException(Response.status(401).build());
 	}
@@ -110,9 +127,8 @@ public class TransactionService {
 			var jsonObject = JWT.parse(signature);
 			var payload = jsonObject.getMap().get("payload");
 			final long exp = ((JsonObject) payload).getLong("exp");
-			var expirationTime =
-					LocalDateTime.ofInstant(Instant.ofEpochMilli(exp * 1000),
-							TimeZone.getDefault().toZoneId());
+			var expirationTime = LocalDateTime.ofInstant(Instant.ofEpochMilli(exp * 1000),
+					TimeZone.getDefault().toZoneId());
 			if (expirationTime.isAfter(LocalDateTime.now())) {
 				var jti = ((JsonObject) payload).getString("jti");
 				if (requisicaoTransacaoDTO.getUuid().toString().equals(jti)) {
@@ -146,7 +162,7 @@ public class TransactionService {
 
 	public boolean delete(String uuid) {
 		final Optional<RequisicaoTransacaoDTO> requisicaoTransacaoDTO = find(uuid);
-		if(requisicaoTransacaoDTO.isPresent()){
+		if (requisicaoTransacaoDTO.isPresent()) {
 			LOG.info("DELETANDO recurso " + uuid);
 			redisClient.del(List.of(uuid));
 			return true;
@@ -158,11 +174,13 @@ public class TransactionService {
 		transactionEmitter.send(
 				Message.of(requisicaoTransacaoDTO).addMetadata(OutgoingKafkaRecordMetadata.<String>builder()
 						.withKey(requisicaoTransacaoDTO.getUuid().toString())
-						.withHeaders(new RecordHeaders().add("x-signature", requisicaoTransacaoDTO.getSignature().getBytes(StandardCharsets.UTF_8)))
+						.withHeaders(new RecordHeaders().add("x-signature",
+								requisicaoTransacaoDTO.getSignature().getBytes(StandardCharsets.UTF_8)))
 						.build()));
 	}
 
-	public String signature(final RequisicaoTransacaoDTO requisicaoTransacaoDTO) throws IOException, InvalidKeySpecException, NoSuchAlgorithmException {
+	public String signature(final RequisicaoTransacaoDTO requisicaoTransacaoDTO)
+			throws IOException, InvalidKeySpecException, NoSuchAlgorithmException {
 
 		var signatureKeys = new HashMap<String, Object>();
 		signatureKeys.put("agencia", requisicaoTransacaoDTO.getBeneficiario().getAgencia());
@@ -210,10 +228,11 @@ public class TransactionService {
 	private PrivateKey getPrivateKey() throws IOException, InvalidKeySpecException, NoSuchAlgorithmException {
 
 		try (InputStream inputStream = getClass().getResourceAsStream("/privateKey.pem");
-		     BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream))) {
+				BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream))) {
 			var privateKeyContent = reader.lines()
 					.collect(Collectors.joining(System.lineSeparator()));
-			privateKeyContent = privateKeyContent.replaceAll("\\n", "").replace("-----BEGIN PRIVATE KEY-----", "").replace("-----END PRIVATE KEY-----", "");
+			privateKeyContent = privateKeyContent.replaceAll("\\n", "").replace("-----BEGIN PRIVATE KEY-----", "")
+					.replace("-----END PRIVATE KEY-----", "");
 			KeyFactory kf = KeyFactory.getInstance("RSA");
 			PKCS8EncodedKeySpec keySpecPKCS8 = new PKCS8EncodedKeySpec(Base64.getDecoder().decode(privateKeyContent));
 			return kf.generatePrivate(keySpecPKCS8);
@@ -223,10 +242,11 @@ public class TransactionService {
 	private PublicKey getPublicKey() throws IOException, InvalidKeySpecException, NoSuchAlgorithmException {
 
 		try (InputStream inputStream = getClass().getResourceAsStream("/publicKey.pem");
-		     BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream))) {
+				BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream))) {
 			var publicKeyContent = reader.lines()
 					.collect(Collectors.joining(System.lineSeparator()));
-			publicKeyContent = publicKeyContent.replaceAll("\\n", "").replace("-----BEGIN PUBLIC KEY-----", "").replace("-----END PUBLIC KEY-----", "");
+			publicKeyContent = publicKeyContent.replaceAll("\\n", "").replace("-----BEGIN PUBLIC KEY-----", "")
+					.replace("-----END PUBLIC KEY-----", "");
 			KeyFactory kf = KeyFactory.getInstance("RSA");
 			X509EncodedKeySpec keySpecX509 = new X509EncodedKeySpec(Base64.getDecoder().decode(publicKeyContent));
 			return (RSAPublicKey) kf.generatePublic(keySpecX509);
